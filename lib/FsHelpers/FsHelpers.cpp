@@ -165,6 +165,8 @@ bool hasTxtExtension(std::string_view fileName) { return checkFileExtension(file
 
 bool hasMarkdownExtension(std::string_view fileName) { return checkFileExtension(fileName, ".md"); }
 
+bool hasPgnExtension(std::string_view fileName) { return checkFileExtension(fileName, ".pgn"); }
+
 bool hasCssExtension(std::string_view fileName) { return checkFileExtension(fileName, ".css"); }
 
 std::string extractFolderPath(const std::string& filePath) {
