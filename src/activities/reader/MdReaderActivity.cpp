@@ -20,7 +20,96 @@ namespace {
 constexpr size_t CHUNK_SIZE = 8 * 1024;  // 8KB chunk for reading
 // Cache file magic and version
 constexpr uint32_t CACHE_MAGIC = 0x4D445244;  // "MDRD"
-constexpr uint8_t CACHE_VERSION = 1;          // Increment when cache format changes
+constexpr uint8_t CACHE_VERSION = 2;          // Increment when cache format changes
+
+std::vector<MdSegment> parseMarkdownInline(const std::string& line, EpdFontFamily::Style baseStyle) {
+    std::vector<MdSegment> segments;
+    size_t i = 0;
+    size_t len = line.length();
+    
+    std::string currentText;
+    bool isBold = (baseStyle & EpdFontFamily::BOLD) != 0;
+    bool isItalic = (baseStyle & EpdFontFamily::ITALIC) != 0;
+
+    auto pushSegment = [&]() {
+        if (!currentText.empty()) {
+            EpdFontFamily::Style style = EpdFontFamily::REGULAR;
+            if (isBold && isItalic) style = EpdFontFamily::BOLD_ITALIC;
+            else if (isBold) style = EpdFontFamily::BOLD;
+            else if (isItalic) style = EpdFontFamily::ITALIC;
+            
+            segments.push_back({currentText, style});
+            currentText.clear();
+        }
+    };
+
+    while (i < len) {
+        if (line[i] == '\\' && i + 1 < len) {
+            currentText += line[i+1];
+            i += 2;
+        } else if (i + 1 < len && ((line[i] == '*' && line[i+1] == '*') || (line[i] == '_' && line[i+1] == '_'))) {
+            pushSegment();
+            isBold = !isBold;
+            i += 2;
+        } else if (line[i] == '*' || line[i] == '_') {
+            pushSegment();
+            isItalic = !isItalic;
+            i += 1;
+        } else {
+            currentText += line[i];
+            i++;
+        }
+    }
+    pushSegment();
+    
+    if (segments.empty()) {
+        segments.push_back({"", baseStyle});
+    }
+    return segments;
+}
+
+std::vector<std::vector<MdSegment>> parseTableCells(const std::string& line, EpdFontFamily::Style baseStyle) {
+    std::vector<std::vector<MdSegment>> cells;
+    size_t start = 0;
+    if (line.front() == '|') start = 1;
+    
+    size_t len = line.length();
+    size_t end = len;
+    if (len > 0 && line.back() == '|') end = len - 1;
+    
+    std::string currentCell;
+    for (size_t i = start; i < end; ++i) {
+        if (line[i] == '\\' && i + 1 < end && line[i+1] == '|') {
+            currentCell += '|';
+            i++;
+        } else if (line[i] == '|') {
+            size_t cellStart = 0;
+            while(cellStart < currentCell.length() && currentCell[cellStart] == ' ') cellStart++;
+            size_t cellEnd = currentCell.length();
+            while(cellEnd > cellStart && currentCell[cellEnd-1] == ' ') cellEnd--;
+            
+            cells.push_back(parseMarkdownInline(currentCell.substr(cellStart, cellEnd - cellStart), baseStyle));
+            currentCell.clear();
+        } else {
+            currentCell += line[i];
+        }
+    }
+    size_t cellStart = 0;
+    while(cellStart < currentCell.length() && currentCell[cellStart] == ' ') cellStart++;
+    size_t cellEnd = currentCell.length();
+    while(cellEnd > cellStart && currentCell[cellEnd-1] == ' ') cellEnd--;
+    cells.push_back(parseMarkdownInline(currentCell.substr(cellStart, cellEnd - cellStart), baseStyle));
+    return cells;
+}
+
+bool isTableSeparator(const std::string& line) {
+    if (line.empty() || line.find('|') == std::string::npos) return false;
+    for (char c : line) {
+        if (c != '|' && c != '-' && c != ' ' && c != ':') return false;
+    }
+    return true;
+}
+
 }  // namespace
 
 void MdReaderActivity::onEnter() {
@@ -283,64 +372,155 @@ bool MdReaderActivity::loadPageAtOffset(size_t offset, std::vector<MdLine>& outL
         lineBytePos += 2; 
     }
 
-    // Emit at least one visual line for each source line (including blank lines),
-    // then continue with wrapping when needed.
-    do {
-      if (line.empty()) {
-        outLines.push_back({"", fontStyle, indentation, isCheckbox, isChecked});
-        break;
-      }
-
-      int maxLineWidth = viewportWidth - indentation;
-      int lineWidth = renderer.getTextAdvanceX(cachedFontId, line.c_str(), fontStyle);
-
-      if (lineWidth <= maxLineWidth) {
-        outLines.push_back({line, fontStyle, indentation, isCheckbox, isChecked});
-        // We only advance by displayLen here if we didn't replace bullet points.
-        // It's safer to just set lineBytePos to displayLen to signify full consumption.
-        lineBytePos = displayLen;  
-        line.clear();
-        break;
-      }
-
-      // Find break point
-      size_t breakPos = line.length();
-      while (breakPos > 0 && renderer.getTextAdvanceX(cachedFontId, line.substr(0, breakPos).c_str(), fontStyle) > maxLineWidth) {
-        // Try to break at space
-        size_t spacePos = line.rfind(' ', breakPos - 1);
-        if (spacePos != std::string::npos && spacePos > 0) {
-          breakPos = spacePos;
-        } else {
-          // Break at character boundary for UTF-8
-          breakPos--;
-          // Make sure we don't break in the middle of a UTF-8 sequence
-          while (breakPos > 0 && (line[breakPos] & 0xC0) == 0x80) {
-            breakPos--;
-          }
+    bool isTable = false;
+    bool isTableSep = false;
+    bool isHr = false;
+    std::vector<std::vector<MdSegment>> tableCells;
+    
+    // Check for Horizontal Rule
+    if (line.length() >= 3 && 
+        (line.find_first_not_of("- ") == std::string::npos ||
+         line.find_first_not_of("* ") == std::string::npos ||
+         line.find_first_not_of("_ ") == std::string::npos)) {
+        int charCount = 0;
+        for (char c : line) if (c == '-' || c == '*' || c == '_') charCount++;
+        if (charCount >= 3) {
+            isHr = true;
         }
-      }
+    }
+    
+    if (!isHr && line.find('|') != std::string::npos && line.length() > 2) {
+        isTableSep = isTableSeparator(line);
+        if (isTableSep || line.front() == '|' || line.find(" | ") != std::string::npos) {
+            isTable = true;
+            if (!isTableSep) {
+                tableCells = parseTableCells(line, fontStyle);
+            }
+        }
+    }
 
-      if (breakPos == 0) {
-        breakPos = 1;
-      }
+    bool fullyConsumed = false;
+    
+    if (isHr) {
+        MdLine mdLine;
+        mdLine.indentation = indentation;
+        mdLine.isHorizontalRule = true;
+        outLines.push_back(mdLine);
+        lineBytePos = displayLen;
+        fullyConsumed = true;
+    } else if (isTable) {
+        MdLine mdLine;
+        mdLine.indentation = indentation;
+        mdLine.isTable = true;
+        mdLine.isTableSeparator = isTableSep;
+        mdLine.tableCells = tableCells;
+        outLines.push_back(mdLine);
+        lineBytePos = displayLen;
+        fullyConsumed = true;
+    } else {
+        std::vector<MdSegment> sourceSegments = parseMarkdownInline(line, fontStyle);
+        
+        do {
+            if (sourceSegments.empty() || (sourceSegments.size() == 1 && sourceSegments[0].text.empty())) {
+                MdLine mdLine;
+                mdLine.segments.push_back({"", fontStyle});
+                mdLine.indentation = indentation;
+                mdLine.isCheckbox = isCheckbox;
+                mdLine.isChecked = isChecked;
+                outLines.push_back(mdLine);
+                sourceSegments.clear();
+                break;
+            }
 
-      outLines.push_back({line.substr(0, breakPos), fontStyle, indentation, isCheckbox, isChecked});
-      isCheckbox = false; // Prevent checkbox from being drawn again on wrapped lines
-
-      // Skip space at break point
-      size_t skipChars = breakPos;
-      if (breakPos < line.length() && line[breakPos] == ' ') {
-        skipChars++;
-      }
-      
-      // If we modified the line (e.g. bullet point), lineBytePos tracking is skewed.
-      // But since bullet lines rarely wrap perfectly, we'll approximate.
-      lineBytePos += skipChars; 
-      line = line.substr(skipChars);
-    } while (!line.empty() && static_cast<int>(outLines.size()) < linesPerPage);
+            int maxLineWidth = viewportWidth - indentation;
+            int currentLineWidth = 0;
+            
+            MdLine currentVisualLine;
+            currentVisualLine.indentation = indentation;
+            currentVisualLine.isCheckbox = isCheckbox;
+            currentVisualLine.isChecked = isChecked;
+            isCheckbox = false; // only first line gets checkbox
+            
+            size_t segIdx = 0;
+            bool wrapped = false;
+            size_t breakPosInSegment = 0;
+            
+            while (segIdx < sourceSegments.size()) {
+                const auto& seg = sourceSegments[segIdx];
+                int segWidth = renderer.getTextAdvanceX(cachedFontId, seg.text.c_str(), seg.fontStyle);
+                
+                if (currentLineWidth + segWidth <= maxLineWidth) {
+                    currentVisualLine.segments.push_back(seg);
+                    currentLineWidth += segWidth;
+                    segIdx++;
+                } else {
+                    size_t breakPos = seg.text.length();
+                    while (breakPos > 0) {
+                        int partialWidth = renderer.getTextAdvanceX(cachedFontId, seg.text.substr(0, breakPos).c_str(), seg.fontStyle);
+                        if (currentLineWidth + partialWidth <= maxLineWidth) {
+                            size_t spacePos = seg.text.rfind(' ', breakPos - 1);
+                            if (spacePos != std::string::npos && spacePos > 0) {
+                                breakPos = spacePos;
+                            } else if (currentLineWidth > 0) {
+                                breakPos = 0;
+                            } else {
+                                breakPos--;
+                                while (breakPos > 0 && (seg.text[breakPos] & 0xC0) == 0x80) {
+                                    breakPos--;
+                                }
+                                if (breakPos == 0) breakPos = 1;
+                            }
+                            break;
+                        }
+                        breakPos--;
+                    }
+                    
+                    if (breakPos == 0 && currentLineWidth > 0) {
+                        breakPosInSegment = 0;
+                    } else {
+                        if (breakPos > 0) {
+                            currentVisualLine.segments.push_back({seg.text.substr(0, breakPos), seg.fontStyle});
+                        }
+                        breakPosInSegment = breakPos;
+                    }
+                    wrapped = true;
+                    break;
+                }
+            }
+            
+            outLines.push_back(currentVisualLine);
+            
+            if (!wrapped) {
+                lineBytePos = displayLen;
+                sourceSegments.clear();
+            } else {
+                size_t consumedChars = 0;
+                for (size_t i = 0; i < segIdx; ++i) consumedChars += sourceSegments[i].text.length();
+                consumedChars += breakPosInSegment;
+                
+                size_t skipChars = 0;
+                if (breakPosInSegment < sourceSegments[segIdx].text.length() && sourceSegments[segIdx].text[breakPosInSegment] == ' ') {
+                    skipChars = 1;
+                }
+                
+                lineBytePos += consumedChars + skipChars;
+                
+                std::vector<MdSegment> remainingSegments;
+                if (breakPosInSegment + skipChars < sourceSegments[segIdx].text.length()) {
+                    remainingSegments.push_back({sourceSegments[segIdx].text.substr(breakPosInSegment + skipChars), sourceSegments[segIdx].fontStyle});
+                }
+                for (size_t i = segIdx + 1; i < sourceSegments.size(); ++i) {
+                    remainingSegments.push_back(sourceSegments[i]);
+                }
+                sourceSegments = remainingSegments;
+            }
+        } while (!sourceSegments.empty() && static_cast<int>(outLines.size()) < linesPerPage);
+        
+        if (sourceSegments.empty()) fullyConsumed = true;
+    }
 
     // Determine how much of the source buffer we consumed
-    if (line.empty()) {
+    if (fullyConsumed) {
       // Fully consumed this source line, move past the newline
       pos = lineEnd + 1;
     } else {
@@ -412,18 +592,69 @@ void MdReaderActivity::renderPage() {
   auto renderLines = [&]() {
     int y = cachedOrientedMarginTop;
     for (const auto& mdLine : currentPageLines) {
-      if (!mdLine.text.empty() || mdLine.isCheckbox) {
+      if (mdLine.isHorizontalRule) {
+        int x = cachedOrientedMarginLeft + mdLine.indentation;
+        int contentWidth = viewportWidth - mdLine.indentation;
+        renderer.drawLine(x, y + lineHeight / 2, x + contentWidth, y + lineHeight / 2, true);
+        y += lineHeight;
+        continue;
+      }
+      
+      if (mdLine.isTableSeparator) {
+        int x = cachedOrientedMarginLeft + mdLine.indentation;
+        int contentWidth = viewportWidth - mdLine.indentation;
+        renderer.drawLine(x, y + lineHeight / 2, x + contentWidth, y + lineHeight / 2, true);
+        y += lineHeight;
+        continue;
+      }
+      
+      if (mdLine.isTable) {
+        int x = cachedOrientedMarginLeft + mdLine.indentation;
+        int contentWidth = viewportWidth - mdLine.indentation;
+        int numCols = mdLine.tableCells.size();
+        if (numCols > 0) {
+          int colWidth = contentWidth / numCols;
+          for (int c = 0; c < numCols; ++c) {
+             int cellX = x + c * colWidth;
+             int currentX = cellX + 5; // padding
+             for (const auto& seg : mdLine.tableCells[c]) {
+                 int segWidth = renderer.getTextAdvanceX(cachedFontId, seg.text.c_str(), seg.fontStyle);
+                 if (currentX + segWidth > cellX + colWidth - 5) {
+                     // Simple truncation
+                     renderer.drawText(cachedFontId, currentX, y, seg.text.c_str(), true, seg.fontStyle);
+                     break; 
+                 } else {
+                     renderer.drawText(cachedFontId, currentX, y, seg.text.c_str(), true, seg.fontStyle);
+                     currentX += segWidth;
+                 }
+             }
+             renderer.drawLine(cellX, y, cellX, y + lineHeight, true);
+          }
+          renderer.drawLine(x + contentWidth, y, x + contentWidth, y + lineHeight, true); // right border
+        }
+        y += lineHeight;
+        continue;
+      }
+
+      if (!mdLine.segments.empty() || mdLine.isCheckbox) {
         const int contentWidth = viewportWidth - mdLine.indentation;
         int x = cachedOrientedMarginLeft + mdLine.indentation;
         int checkboxOffset = mdLine.isCheckbox ? 20 : 0;
         
-        const bool lineIsRtl = BidiUtils::startsWithRtl(mdLine.text.c_str(), BidiUtils::RTL_PARAGRAPH_PROBE_DEPTH);
+        std::string fullText;
+        for (const auto& seg : mdLine.segments) fullText += seg.text;
+        
+        const bool lineIsRtl = BidiUtils::startsWithRtl(fullText.c_str(), BidiUtils::RTL_PARAGRAPH_PROBE_DEPTH);
         uint8_t effectiveAlignment = cachedParagraphAlignment;
         if (lineIsRtl && (effectiveAlignment == CrossPointSettings::LEFT_ALIGN ||
                           effectiveAlignment == CrossPointSettings::JUSTIFIED)) {
           effectiveAlignment = CrossPointSettings::RIGHT_ALIGN;
         }
-        const int textWidth = renderer.getTextAdvanceX(cachedFontId, mdLine.text.c_str(), mdLine.fontStyle);
+        
+        int textWidth = 0;
+        for (const auto& seg : mdLine.segments) {
+            textWidth += renderer.getTextAdvanceX(cachedFontId, seg.text.c_str(), seg.fontStyle);
+        }
 
         // Apply text alignment
         switch (effectiveAlignment) {
@@ -455,8 +686,12 @@ void MdReaderActivity::renderPage() {
            }
         }
 
-        if (!mdLine.text.empty()) {
-          renderer.drawText(cachedFontId, x, y, mdLine.text.c_str(), true, mdLine.fontStyle);
+        int currentX = x;
+        for (const auto& seg : mdLine.segments) {
+          if (!seg.text.empty()) {
+            renderer.drawText(cachedFontId, currentX, y, seg.text.c_str(), true, seg.fontStyle);
+            currentX += renderer.getTextAdvanceX(cachedFontId, seg.text.c_str(), seg.fontStyle);
+          }
         }
       }
       y += lineHeight;

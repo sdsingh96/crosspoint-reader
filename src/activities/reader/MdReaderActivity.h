@@ -8,12 +8,24 @@
 #include "activities/Activity.h"
 #include <EpdFontFamily.h>
 
-struct MdLine {
+struct MdSegment {
     std::string text;
     EpdFontFamily::Style fontStyle;
-    int indentation;
+};
+
+struct MdLine {
+    std::vector<MdSegment> segments;
+    int indentation = 0;
     bool isCheckbox = false;
     bool isChecked = false;
+
+    // Table support
+    bool isTable = false;
+    bool isTableSeparator = false;
+    std::vector<std::vector<MdSegment>> tableCells;
+
+    // Horizontal Rule
+    bool isHorizontalRule = false;
 };
 
 class MdReaderActivity final : public Activity {
