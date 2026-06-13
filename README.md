@@ -1,10 +1,15 @@
-# CrossPoint Reader
+# CrossPoint Reader with PGN viewer for replaying chess games and a markdown viewer 
 
 [![Fund contributors](https://img.shields.io/badge/%F0%9F%91%91_Fund_contributors-royalty.dev-BB953A?style=for-the-badge&labelColor=1a1a1a)](https://app.royalty.dev/crosspoint-reader/crosspoint-reader)
 
-CrossPoint is open-source e-reader firmware - community-built, fully hackable, free forever. It's maintained by a growing community of developers and readers who believe your device should do what you want - not what a manufacturer decided for you.
+CrossPoint is open-source e-reader firmware - community-built, fully hackable, free forever. It's maintained by a growing community of developers and readers who believe your device should do what you want - not what a manufacturer decided for you. I have just added support to view chess games stored in PGN format and also render markdown text!
 
-**Now running on:** ESP32C3-based Xteink [X4](https://www.xteink.com/products/xteink-x4) and [X3](https://www.xteink.com/products/xteink-x3).
+<img width="250" height="500" alt="image" src="https://github.com/user-attachments/assets/806c886c-bc71-485a-ab5e-2e91e0152e72" />
+
+<img width="250" height="500" alt="image" src="https://github.com/user-attachments/assets/1ae962df-01a7-470e-a34c-aae27e36d1e4" />
+
+
+**Now running on:** ESP32C3-based [X3](https://www.xteink.com/products/xteink-x3).
 
 ![CrossPoint Reader running on Xteink device](./docs/images/cover.jpg)
 
