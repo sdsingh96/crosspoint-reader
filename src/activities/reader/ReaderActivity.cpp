@@ -9,6 +9,10 @@
 #include "SdCardFontSystem.h"
 #include "Txt.h"
 #include "TxtReaderActivity.h"
+#include "MdReaderActivity.h"
+#include "Pgn.h"
+#include "PgnReaderActivity.h"
+#include "PgnListActivity.h"
 #include "Xtc.h"
 #include "XtcReaderActivity.h"
 #include "activities/util/BmpViewerActivity.h"
@@ -17,9 +21,14 @@
 bool ReaderActivity::isXtcFile(const std::string& path) { return FsHelpers::hasXtcExtension(path); }
 
 bool ReaderActivity::isTxtFile(const std::string& path) {
-  return FsHelpers::hasTxtExtension(path) ||
-         FsHelpers::hasMarkdownExtension(path);  // Treat .md as txt files (until we have a markdown reader)
+  return FsHelpers::hasTxtExtension(path);
 }
+
+bool ReaderActivity::isMdFile(const std::string& path) {
+  return FsHelpers::hasMarkdownExtension(path);
+}
+
+bool ReaderActivity::isPgnFile(const std::string& path) { return FsHelpers::hasPgnExtension(path); }
 
 bool ReaderActivity::isBmpFile(const std::string& path) { return FsHelpers::hasBmpExtension(path); }
 
@@ -68,6 +77,21 @@ std::unique_ptr<Txt> ReaderActivity::loadTxt(const std::string& path) {
   return nullptr;
 }
 
+std::unique_ptr<Pgn> ReaderActivity::loadPgn(const std::string& path) {
+  if (!Storage.exists(path.c_str())) {
+    LOG_ERR("READER", "File does not exist: %s", path.c_str());
+    return nullptr;
+  }
+
+  auto pgn = std::unique_ptr<Pgn>(new Pgn(path));
+  if (pgn->load()) {
+    return pgn;
+  }
+
+  LOG_ERR("READER", "Failed to load PGN");
+  return nullptr;
+}
+
 void ReaderActivity::goToLibrary(const std::string& fromBookPath) {
   // If coming from a book, start in that book's folder; otherwise start from root
   auto initialPath = fromBookPath.empty() ? "/" : FsHelpers::extractFolderPath(fromBookPath);
@@ -96,6 +120,18 @@ void ReaderActivity::onGoToTxtReader(std::unique_ptr<Txt> txt) {
   activityManager.replaceActivity(std::make_unique<TxtReaderActivity>(renderer, mappedInput, std::move(txt)));
 }
 
+void ReaderActivity::onGoToMdReader(std::unique_ptr<Txt> md) {
+  const auto mdPath = md->getPath();
+  currentBookPath = mdPath;
+  activityManager.replaceActivity(std::make_unique<MdReaderActivity>(renderer, mappedInput, std::move(md)));
+}
+
+void ReaderActivity::onGoToPgnReader(std::unique_ptr<Pgn> pgn) {
+  const auto pgnPath = pgn->getPath();
+  currentBookPath = pgnPath;
+  activityManager.replaceActivity(std::make_unique<PgnListActivity>(renderer, mappedInput, std::move(pgn)));
+}
+
 void ReaderActivity::onEnter() {
   Activity::onEnter();
 
@@ -116,6 +152,13 @@ void ReaderActivity::onEnter() {
       return;
     }
     onGoToXtcReader(std::move(xtc));
+  } else if (isMdFile(initialBookPath)) {
+    auto md = loadTxt(initialBookPath);
+    if (!md) {
+      onGoBack();
+      return;
+    }
+    onGoToMdReader(std::move(md));
   } else if (isTxtFile(initialBookPath)) {
     auto txt = loadTxt(initialBookPath);
     if (!txt) {
@@ -123,6 +166,13 @@ void ReaderActivity::onEnter() {
       return;
     }
     onGoToTxtReader(std::move(txt));
+  } else if (isPgnFile(initialBookPath)) {
+    auto pgn = loadPgn(initialBookPath);
+    if (!pgn) {
+      onGoBack();
+      return;
+    }
+    onGoToPgnReader(std::move(pgn));
   } else {
     auto epub = loadEpub(initialBookPath);
     if (!epub) {
